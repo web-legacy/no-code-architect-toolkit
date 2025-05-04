@@ -31,8 +31,6 @@ MAX_QUEUE_LENGTH = int(os.environ.get('MAX_QUEUE_LENGTH', 0))
 
 def create_app():
     app = Flask(__name__)
-    # Enable CORS for all origins on all routes
-    CORS(app, resources={r"/*": {"origins": "*"}})
 
     # Create a queue to hold tasks
     task_queue = Queue()
@@ -268,6 +266,9 @@ def create_app():
     app.register_blueprint(v1_media_metadata_bp)
     app.register_blueprint(v1_toolkit_job_status_bp)
     app.register_blueprint(v1_toolkit_jobs_status_bp)
+
+    # Enable CORS for all origins on all routes (moved here)
+    CORS(app, resources={r"/*": {"origins": "*"}})
 
     return app
 
