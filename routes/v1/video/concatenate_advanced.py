@@ -103,12 +103,13 @@ def concatenate_advanced_api():
         # The -map options are part of the filter_complex output streams, so they are handled there.
         # The rest are output encoding options.
         command.extend([
+            '-map', '[outv]',
+            '-map', '[outa]',
             '-c:v', 'libx264',
             '-crf', '23',
             '-preset', 'medium',
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-c:s', 'mov_text', # For subtitles
             '-movflags', '+faststart',
             output_filepath
         ])
