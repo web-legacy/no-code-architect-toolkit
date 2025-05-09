@@ -238,6 +238,7 @@ def create_app():
     from routes.v1.media.metadata import v1_media_metadata_bp
     from routes.v1.toolkit.job_status import v1_toolkit_job_status_bp
     from routes.v1.toolkit.jobs_status import v1_toolkit_jobs_status_bp
+    from routes.v1.video.concatenate_advanced import v1_video_concatenate_advanced_bp # Import new blueprint
 
     app.register_blueprint(v1_ffmpeg_compose_bp)
     app.register_blueprint(v1_media_transcribe_bp)
@@ -266,6 +267,7 @@ def create_app():
     app.register_blueprint(v1_media_metadata_bp)
     app.register_blueprint(v1_toolkit_job_status_bp)
     app.register_blueprint(v1_toolkit_jobs_status_bp)
+    app.register_blueprint(v1_video_concatenate_advanced_bp) # Register new blueprint
 
     # Enable CORS for all origins on all routes (moved here)
     CORS(app, resources={r"/*": {"origins": "*"}})
