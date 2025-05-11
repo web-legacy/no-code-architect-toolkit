@@ -25,6 +25,7 @@ from PIL import Image # Changed import
 from flask import Blueprint # Added import
 from app_utils import * # Added import
 from services.authentication import authenticate # Added import
+from services.cloud_storage import upload_file # Added import
 
 logger = logging.getLogger(__name__)
 
