@@ -66,7 +66,7 @@ def image_to_video(job_id, data): # Added endpoint function
         # The output_gcs_bucket and output_gcs_blob_name need to be determined here.
         # Assuming a default output bucket and blob name structure for now.
         # This might need adjustment based on your cloud_storage service implementation.
-        output_gcs_bucket = "your-output-bucket-name" # Replace with actual bucket name
+        output_gcs_bucket = fb-studio-video-captioner-bucket # Replace with actual bucket name
         output_gcs_blob_name = f"videos/{job_id}.mp4" # Example blob name structure
 
         output_gcs_url = process_image_to_video(
