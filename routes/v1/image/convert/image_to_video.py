@@ -20,13 +20,11 @@ import os
 import subprocess
 import logging
 from services.file_management import download_file  # Assumed modified for streaming
-from google.cloud import storage  # Add this import
-import PIL.Image as Image # Changed import
+from PIL import Image # Changed import
 
 from flask import Blueprint # Added import
 from app_utils import * # Added import
 from services.authentication import authenticate # Added import
-from services.cloud_storage import upload_file # Added import
 
 logger = logging.getLogger(__name__)
 
@@ -152,12 +150,14 @@ def process_image_to_video(image_gcs_url, length, frame_rate, zoom_speed, job_id
             raise subprocess.CalledProcessError(process.returncode, cmd, stdout, stderr)
 
         # Upload the result to GCS
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(output_gcs_bucket)
-        blob = bucket.blob(output_gcs_blob_name)
-        blob.upload_from_string(stdout)
-
-        output_gcs_url = f"gs://{output_gcs_bucket}/{output_gcs_blob_name}"
+        # Use the imported upload_file utility from services.cloud_storage
+        output_gcs_url = upload_file(
+            bucket_name=output_gcs_bucket,
+            destination_blob_name=output_gcs_blob_name,
+            data=stdout,  # stdout contains the video data from ffmpeg
+            content_type='video/mp4'  # Assuming this based on the .mp4 extension in output_gcs_blob_name
+        )
+        # Assuming upload_file returns the full GCS URI e.g., "gs://bucket/path/to/file.mp4"
         logger.info(f"Video created successfully: {output_gcs_url}")
 
         return output_gcs_url
