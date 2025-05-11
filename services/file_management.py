@@ -21,6 +21,11 @@ import uuid
 import requests
 from urllib.parse import urlparse, parse_qs
 import mimetypes
+from google.cloud import storage # Add this import
+
+# Assuming a local storage path is configured (still needed for temp files if any)
+LOCAL_STORAGE_PATH = os.environ.get('LOCAL_STORAGE_PATH', '/tmp')
+
 
 def get_extension_from_url(url):
     """Extract file extension from URL or content type.
@@ -55,34 +60,19 @@ def get_extension_from_url(url):
     # If we can't determine the extension, raise an error
     raise ValueError(f"Could not determine file extension from URL: {url}")
 
-def download_file(url, storage_path="/tmp/"):
-    """Download a file from URL to local storage."""
-    # Create storage directory if it doesn't exist
-    os.makedirs(storage_path, exist_ok=True)
-    
-    file_id = str(uuid.uuid4())
-    extension = get_extension_from_url(url)
-    local_filename = os.path.join(storage_path, f"{file_id}{extension}")
 
+def download_file(gcs_url):
+    """Streams a file from GCS.  Does NOT download to local disk."""
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
+        # Parse the GCS URL
+        bucket_name, blob_name = gcs_url.split('/', 2)[2:]
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
 
-        with open(local_filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+        # Return a file-like object streaming the data; the actual data is not downloaded here!
+        return blob.open("rb")  # 'rb' is crucial for reading binary data
 
-        return local_filename
     except Exception as e:
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
-        raise e
-
-
-def delete_old_files():
-    now = time.time()
-    for filename in os.listdir(STORAGE_PATH):
-        file_path = os.path.join(STORAGE_PATH, filename)
-        if os.path.isfile(file_path) and os.stat(file_path).st_mtime < now - 3600:
-            os.remove(file_path)
+        print(f"Error downloading from GCS: {e}")  # Replace with proper logging
+        return None # Better error handling is required in a production-ready setting

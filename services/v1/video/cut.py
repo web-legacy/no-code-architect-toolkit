@@ -25,6 +25,7 @@ import tempfile
 from services.file_management import download_file
 from services.cloud_storage import upload_file
 from config import LOCAL_STORAGE_PATH
+from urllib.parse import urlparse # Added import
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -40,50 +41,45 @@ def time_to_seconds(time_str):
     Returns:
         float: Time in seconds
     """
-    try:
-        parts = time_str.split(':')
-        if len(parts) == 3:
-            hours, minutes, seconds = parts
-            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        elif len(parts) == 2:
-            minutes, seconds = parts
-            return int(minutes) * 60 + float(seconds)
-        else:
-            return float(time_str)
-    except ValueError:
-        raise ValueError(f"Invalid time format: {time_str}. Expected HH:MM:SS[.mmm]")
-
-def cut_media(video_url, cuts, job_id=None, video_codec='libx264', video_preset='medium', 
-           video_crf=23, audio_codec='aac', audio_bitrate='128k'):
-    """
-    Cuts specified segments from a video file with customizable encoding settings.
-    
-    Args:
-        video_url (str): URL of the video file to cut
-        cuts (list): List of dictionaries with 'start' and 'end' timestamps
-        job_id (str, optional): Unique job identifier
-        video_codec (str, optional): Video codec to use for encoding (default: 'libx264')
-        video_preset (str, optional): Encoding preset for speed/quality tradeoff (default: 'medium')
-        video_crf (int, optional): Constant Rate Factor for quality (0-51, default: 23)
-        audio_codec (str, optional): Audio codec to use for encoding (default: 'aac')
-        audio_bitrate (str, optional): Audio bitrate (default: '128k')
-        
-    Returns:
-        str: Path to the processed local file
-    """
     logger.info(f"Starting video cut operation for {video_url}")
-    input_filename = download_file(video_url, os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_input"))
-    logger.info(f"Downloaded video to local file: {input_filename}")
     
-    temp_files = []
-    
+    input_filename = None # Initialize input_filename for cleanup
+    temp_files = [] # Initialize temp_files list
+
     try:
+        # Use the streaming download_file
+        video_stream = download_file(video_url)  # Get a file-like object streaming from GCS
+
+        if video_stream is None:
+            logger.error(f"Job {job_id}: Failed to get stream for {video_url}")
+            raise Exception("Failed to get stream for video file")
+
+        # Create a temporary file to write the stream to for FFmpeg input
+        temp_file_extension = os.path.splitext(urlparse(video_url).path)[1] or '.mp4' # Default to .mp4 if no extension
+        input_filename = os.path.join(LOCAL_STORAGE_PATH, f"cut_input_{uuid.uuid4()}{temp_file_extension}")
+        temp_files.append(input_filename) # Add to temp_files for cleanup
+        
+        # Ensure the local directory exists
+        os.makedirs(LOCAL_STORAGE_PATH, exist_ok=True)
+
+        # Write the stream to the temporary file
+        with open(input_filename, 'wb') as f:
+            while True:
+                chunk = video_stream.read(8192) # Read in chunks
+                if not chunk:
+                    break
+                f.write(chunk)
+        video_stream.close() # Close the stream after writing to temp file
+
+        logger.info(f"Job {job_id}: Streamed and saved video to temporary file: {input_filename}")
+
         # Get the file extension
         _, ext = os.path.splitext(input_filename)
         
         # Create output filename
         output_filename = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_output{ext}")
-        
+        temp_files.append(output_filename) # Add output file to temp_files
+
         # Get the duration of the input file
         probe_cmd = [
             'ffprobe', 
@@ -255,25 +251,14 @@ def cut_media(video_url, cuts, job_id=None, video_codec='libx264', video_preset=
                     # Create an empty file
                     pass
         
-        # Clean up temporary files
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-                logger.info(f"Removed temporary file: {temp_file}")
-        
-        return output_filename, input_filename
+        return output_filename, input_filename # Return output_filename and original input_filename (temp file)
         
     except Exception as e:
         logger.error(f"Video cut operation failed: {str(e)}")
+        raise
+    finally:
         # Clean up all temporary files if they exist
         for temp_file in temp_files:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
-                
-        if 'input_filename' in locals() and os.path.exists(input_filename):
-            os.remove(input_filename)
-                    
-        if 'output_filename' in locals() and os.path.exists(output_filename):
-            os.remove(output_filename)
-            
-        raise
+                logger.info(f"Removed temporary file: {temp_file}")

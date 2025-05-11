@@ -29,6 +29,48 @@ from config import LOCAL_STORAGE_PATH
 v1_video_concatenate_advanced_bp = Blueprint('v1_video_concatenate_advanced', __name__)
 logger = logging.getLogger(__name__)
 
+def probe_file_for_audio_and_duration(filepath):
+    """
+    Probes a video file using ffprobe to check for an audio stream and get duration.
+    Returns a dictionary with 'has_audio' (bool) and 'duration' (float or None).
+    """
+    command = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'a:0', # Select the first audio stream
+        '-show_entries', 'stream=codec_type',
+        '-show_entries', 'format=duration',
+        '-of', 'json',
+        filepath
+    ]
+    try:
+        process = subprocess.run(command, check=True, capture_output=True, text=True)
+        probe_data = json.loads(process.stdout)
+
+        has_audio = 'streams' in probe_data and len(probe_data['streams']) > 0
+        duration = None
+        if 'format' in probe_data and 'duration' in probe_data['format']:
+            try:
+                duration = float(probe_data['format']['duration'])
+            except ValueError:
+                pass # Duration not a valid float
+
+        return {"has_audio": has_audio, "duration": duration}
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"ffprobe failed for {filepath}. Stderr: {e.stderr}")
+        return {"has_audio": False, "duration": None} # Assume no audio/duration on error
+    except FileNotFoundError:
+        logger.error("ffprobe command not found. Is FFmpeg installed and in PATH?")
+        return {"has_audio": False, "duration": None} # Assume no audio/duration if ffprobe not found
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse ffprobe JSON output for {filepath}.")
+        return {"has_audio": False, "duration": None} # Assume no audio/duration on parse error
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during ffprobe for {filepath}: {str(e)}")
+        return {"has_audio": False, "duration": None} # Assume no audio/duration on other errors
+
+
 @v1_video_concatenate_advanced_bp.route('/v1/video/concatenate/advanced', methods=['POST'])
 @authenticate # Placeholder - ensure this decorator works as expected
 # @validate_payload({ # Placeholder - define your payload schema here
@@ -53,41 +95,148 @@ def concatenate_advanced_api():
     logger.info(f"Job {job_id_param}: Received advanced video concatenation request")
 
     try:
+        local_input_paths = [] # Initialize local_input_paths
         data = request.get_json()
         if not data:
             return jsonify({"error": "Invalid JSON payload"}), 400
 
         input_urls = data.get("input_urls")
-        filter_complex_str = data.get("filter_complex")
+        # filter_complex_str is now generated dynamically in this backend
         # output_options_list = data.get("output_options") # This might be more structured
+        aspect_ratio_str = data.get("aspect_ratio") # Get aspect_ratio from payload
 
         if not input_urls or not isinstance(input_urls, list) or len(input_urls) == 0:
             return jsonify({"error": "Missing or invalid 'input_urls'"}), 400
-        if not filter_complex_str or not isinstance(filter_complex_str, str):
-            return jsonify({"error": "Missing or invalid 'filter_complex' string"}), 400
+        if not aspect_ratio_str or not isinstance(aspect_ratio_str, str): # Check for aspect_ratio
+            return jsonify({"error": "Missing or invalid 'aspect_ratio' string"}), 400
         
-        # --- Download input files ---
-        local_input_paths = []
+        # --- Download and probe input files (using streaming download) ---
+        input_details = []
         for url in input_urls:
+            local_path = None # Initialize local_path for cleanup
             try:
-                logger.info(f"Job {job_id_param}: Downloading input file: {url}")
-                local_path = download_file(url, LOCAL_STORAGE_PATH)
+                logger.info(f"Job {job_id_param}: Streaming download and processing input file: {url}")
+                
+                # Use the streaming download_file
+                image_stream = download_file(url)  # Get a file-like object streaming from GCS
+
+                if image_stream is None:
+                    logger.error(f"Job {job_id_param}: Failed to get stream for {url}")
+                    raise Exception("Failed to get stream for input file")
+
+                # Create a temporary file to write the stream to for ffprobe and FFmpeg input
+                # This is a compromise to avoid full download upfront but still provide a seekable file
+                # for ffprobe and FFmpeg -i input.
+                temp_file_extension = os.path.splitext(urlparse(url).path)[1] or '.mp4' # Default to .mp4 if no extension
+                local_path = os.path.join(LOCAL_STORAGE_PATH, f"input_{uuid.uuid4()}{temp_file_extension}")
+                
+                # Ensure the local directory exists
+                os.makedirs(LOCAL_STORAGE_PATH, exist_ok=True)
+
+                # Write the stream to the temporary file
+                with open(local_path, 'wb') as f:
+                    while True:
+                        chunk = image_stream.read(8192) # Read in chunks
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                image_stream.close() # Close the stream after writing to temp file
+
+                logger.info(f"Job {job_id_param}: Streamed and saved {url} to temporary file: {local_path}")
+
+                logger.info(f"Job {job_id_param}: Probing file: {local_path}")
+                probe_result = probe_file_for_audio_and_duration(local_path)
+                logger.info(f"Job {job_id_param}: Probe result for {local_path}: {probe_result}")
+
+                processed_local_path = local_path # Default to original temp file path
+                
+                # If no audio, add a silent audio track
+                if not probe_result["has_audio"]:
+                    logger.info(f"Job {job_id_param}: Input file {url} has no audio. Adding silent audio track.")
+                    # Create a new temporary file path for the video with silent audio
+                    silent_audio_output_path = os.path.join(LOCAL_STORAGE_PATH, f"silent_audio_{uuid.uuid4()}{os.path.splitext(local_path)[1]}")
+                    
+                    # Use the probed duration, or a default if probing failed
+                    duration = probe_result["duration"] if probe_result["duration"] is not None else 5 
+
+                    if not add_silent_audio_track(local_path, silent_audio_output_path, duration):
+                         # Clean up original downloaded file
+                        if os.path.exists(local_path): os.remove(local_path)
+                        return jsonify({"error": f"Failed to add silent audio track to {url}"}), 500
+                    
+                    processed_local_path = silent_audio_output_path
+                    logger.info(f"Job {job_id_param}: Added silent audio to {url}. New path: {processed_local_path}")
+                    # Add the new temporary file to the cleanup list
+                    local_input_paths.append(processed_local_path)
+
+
+                input_details.append({
+                    "url": url,
+                    "local_path": processed_local_path, # Use the processed path (temp file)
+                    "has_audio": True, # Now guaranteed to have audio (original or silent)
+                    "duration": probe_result["duration"] # Keep original duration info
+                })
+                # Add the original temporary file to the cleanup list
                 local_input_paths.append(local_path)
-                logger.info(f"Job {job_id_param}: Downloaded {url} to {local_path}")
+
+
             except Exception as e:
-                logger.error(f"Job {job_id_param}: Failed to download input file {url}: {str(e)}")
-                # Clean up already downloaded files for this job if one fails
+                logger.error(f"Job {job_id_param}: Failed to process input file {url}: {str(e)}")
+                # Clean up all local files for this job
                 for p in local_input_paths:
                     if os.path.exists(p): os.remove(p)
-                return jsonify({"error": f"Failed to download input file: {url}", "details": str(e)}), 500
+                return jsonify({"error": f"Failed to process input file: {url}", "details": str(e)}), 500
         
         # --- Construct FFmpeg command ---
         # Example: ffmpeg -i input1.mp4 -i input2.mp4 -filter_complex "..." output.mp4
         command = ['ffmpeg']
-        for path in local_input_paths:
-            command.extend(['-i', path])
+        for detail in input_details:
+            command.extend(['-i', detail["local_path"]])
         
-        command.extend(['-filter_complex', filter_complex_str])
+        # --- Dynamically Construct FFmpeg filter_complex ---
+        filter_complex_parts = []
+        concat_video_streams = ""
+        concat_audio_streams = ""
+        
+        # Assuming target resolution is fixed for now, or derived from payload if added later
+        # For now, using a placeholder target resolution (e.g., 1920x1080 for 16:9)
+        # This should ideally come from the frontend payload based on user selection.
+        # Calculate target resolution based on aspect_ratio from payload
+        try:
+            ratio_x, ratio_y = map(int, aspect_ratio_str.split(':'))
+            if ratio_y == 0: raise ValueError("Aspect ratio Y cannot be zero")
+            # Using a common base height, e.g., 1080p
+            base_height = 1080
+            target_height = base_height
+            target_width = round(base_height * (ratio_x / ratio_y))
+            if target_width % 2 != 0: # Ensure even width
+                target_width += 1
+            logger.info(f"Job {job_id_param}: Calculated target resolution {target_width}x{target_height} for aspect ratio {aspect_ratio_str}")
+        except ValueError as e:
+            logger.error(f"Job {job_id_param}: Invalid aspect_ratio format: {aspect_ratio_str}. Error: {str(e)}")
+            return jsonify({"error": f"Invalid aspect_ratio format: {aspect_ratio_str}", "details": str(e)}), 400
+
+
+        for i, detail in enumerate(input_details):
+            # Video stream processing (scaling and padding)
+            filter_complex_parts.append(
+                f"[{i}:v]scale='min({target_width},iw*{target_height}/ih)':'min({target_height},ih*{target_width}/iw)',"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS[v{i}]"
+            )
+            concat_video_streams += f"[v{i}]"
+
+            # Audio stream processing (simplified as all inputs now have audio)
+            filter_complex_parts.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
+            concat_audio_streams += f"[a{i}]"
+
+        # Concatenate video and audio streams with correct interleaving
+        interleaved_concat_streams = ""
+        for i in range(len(input_details)):
+            interleaved_concat_streams += f"[v{i}][a{i}]"
+
+        dynamic_filter_complex_str = f"{'; '.join(filter_complex_parts)}; {interleaved_concat_streams}concat=n={len(input_details)}:v=1:a=1[outv][outa]"
+        logger.info(f"Job {job_id_param}: Generated dynamic filter_complex: {dynamic_filter_complex_str}")
+        command.extend(['-filter_complex', dynamic_filter_complex_str])
         
         # Define output filename and add output options
         # For simplicity, assuming one output for now.

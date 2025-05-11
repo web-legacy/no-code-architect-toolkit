@@ -24,6 +24,9 @@ from whisper.utils import WriteSRT, WriteVTT
 from services.file_management import download_file
 import logging
 from config import LOCAL_STORAGE_PATH
+from urllib.parse import urlparse # Added import
+import mimetypes # Added import
+import uuid # Added import
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -32,10 +35,35 @@ logging.basicConfig(level=logging.INFO)
 def process_transcribe_media(media_url, task, include_text, include_srt, include_segments, word_timestamps, response_type, language, job_id, words_per_line=None):
     """Transcribe or translate media and return the transcript/translation, SRT or VTT file path."""
     logger.info(f"Starting {task} for media URL: {media_url}")
-    input_filename = download_file(media_url, os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_input"))
-    logger.info(f"Downloaded media to local file: {input_filename}")
-
+    
+    input_filename = None # Initialize input_filename for cleanup
     try:
+        # Use the streaming download_file
+        media_stream = download_file(media_url)  # Get a file-like object streaming from GCS
+
+        if media_stream is None:
+            logger.error(f"Job {job_id}: Failed to get stream for {media_url}")
+            raise Exception("Failed to get stream for media file")
+
+        # Create a temporary file to write the stream to for whisper.transcribe()
+        temp_file_extension = os.path.splitext(urlparse(media_url).path)[1] or '.mp4' # Default to .mp4 if no extension
+        input_filename = os.path.join(LOCAL_STORAGE_PATH, f"transcribe_input_{uuid.uuid4()}{temp_file_extension}")
+        
+        # Ensure the local directory exists
+        os.makedirs(LOCAL_STORAGE_PATH, exist_ok=True)
+
+        # Write the stream to the temporary file
+        with open(input_filename, 'wb') as f:
+            while True:
+                chunk = media_stream.read(8192) # Read in chunks
+                if not chunk:
+                    break
+                f.write(chunk)
+        media_stream.close() # Close the stream after writing to temp file
+
+        logger.info(f"Job {job_id}: Streamed and saved media to temporary file: {input_filename}")
+
+
         # Load a larger model for better translation quality
         #model_size = "large" if task == "translate" else "base"
         model_size = "base"
@@ -121,8 +149,6 @@ def process_transcribe_media(media_url, task, include_text, include_srt, include
         if include_segments is True:
             segments_json = result['segments']
 
-        os.remove(input_filename)
-        logger.info(f"Removed local file: {input_filename}")
         logger.info(f"{task.capitalize()} successful, output type: {response_type}")
 
         if response_type == "direct":
@@ -155,3 +181,8 @@ def process_transcribe_media(media_url, task, include_text, include_srt, include
     except Exception as e:
         logger.error(f"{task.capitalize()} failed: {str(e)}")
         raise
+    finally:
+        # Clean up the temporary input file
+        if input_filename and os.path.exists(input_filename):
+            os.remove(input_filename)
+            logger.info(f"Removed local file: {input_filename}")

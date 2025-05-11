@@ -24,6 +24,7 @@ import uuid
 from services.file_management import download_file
 from services.cloud_storage import upload_file
 from config import LOCAL_STORAGE_PATH
+from urllib.parse import urlparse # Added import
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -74,12 +75,35 @@ def split_video(video_url, splits, job_id=None, video_codec='libx264', video_pre
     if not job_id:
         job_id = str(uuid.uuid4())
         
-    input_filename = download_file(video_url, os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_input"))
-    logger.info(f"Downloaded video to local file: {input_filename}")
-    
-    output_files = []
-    
+    input_filename = None # Initialize input_filename for cleanup
+    output_files = [] # Initialize output_files list for cleanup
+
     try:
+        # Use the streaming download_file
+        video_stream = download_file(video_url)  # Get a file-like object streaming from GCS
+
+        if video_stream is None:
+            logger.error(f"Job {job_id}: Failed to get stream for {video_url}")
+            raise Exception("Failed to get stream for video file")
+
+        # Create a temporary file to write the stream to for FFmpeg input
+        temp_file_extension = os.path.splitext(urlparse(video_url).path)[1] or '.mp4' # Default to .mp4 if no extension
+        input_filename = os.path.join(LOCAL_STORAGE_PATH, f"split_input_{uuid.uuid4()}{temp_file_extension}")
+        
+        # Ensure the local directory exists
+        os.makedirs(LOCAL_STORAGE_PATH, exist_ok=True)
+
+        # Write the stream to the temporary file
+        with open(input_filename, 'wb') as f:
+            while True:
+                chunk = video_stream.read(8192) # Read in chunks
+                if not chunk:
+                    break
+                f.write(chunk)
+        video_stream.close() # Close the stream after writing to temp file
+
+        logger.info(f"Job {job_id}: Streamed and saved video to temporary file: {input_filename}")
+
         # Get the file extension
         _, ext = os.path.splitext(input_filename)
         
@@ -164,18 +188,19 @@ def split_video(video_url, splits, job_id=None, video_codec='libx264', video_pre
             output_files.append(output_filename)
             logger.info(f"Successfully created split {index+1}: {output_filename}")
         
-        # Return the list of output files and the input filename
+        # Return the list of output files and the input filename (temp file)
         return output_files, input_filename
         
     except Exception as e:
         logger.error(f"Video split operation failed: {str(e)}")
-        
+        raise
+    finally:
         # Clean up all temporary files if they exist
-        if 'input_filename' in locals() and os.path.exists(input_filename):
+        if input_filename and os.path.exists(input_filename):
             os.remove(input_filename)
+            logger.info(f"Removed temporary input file: {input_filename}")
                 
         for output_file in output_files:
             if os.path.exists(output_file):
                 os.remove(output_file)
-                
-        raise
+                logger.info(f"Removed temporary output file: {output_file}")
