@@ -96,23 +96,39 @@ def process_image_to_video(image_gcs_url, length, frame_rate, zoom_speed, job_id
             logger.error(f"Failed to download image from GCS: {image_gcs_url}")
             raise Exception("Failed to download image from GCS")
 
+        # Get image dimensions using FFprobe
+        ffprobe_command = [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            "-i", "-"  # Input from stdin
+        ]
 
-        # Get image dimensions (this needs a workaround since Pillow can't handle streams directly)
-        #  You'll either need a temporary local file (minimal size), or analyze the metadata from GCS if available.
-        #  This is a crucial point that the example does not solve (it does not even handle different image types well)
-        # --- WORKAROUND START ---
-        # Download to a temp file (small overhead)
-        with open("/tmp/temp_image.jpg", "wb") as temp_image:
-            temp_image.write(image_stream.read())
-        image_stream.close() # crucial to close here
+        process = subprocess.Popen(
+            ffprobe_command,
+            stdin=image_stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = process.communicate()
 
-        with Image.open("/tmp/temp_image.jpg") as img:
-            width, height = img.size
-        os.remove("/tmp/temp_image.jpg") #clean the temp file
-        # --- WORKAROUND END ---
+        if stderr:
+            logger.error(f"FFprobe error: {stderr.decode('utf-8')}")
+            raise Exception(f"FFprobe error: {stderr.decode('utf-8')}")
+
+        ffprobe_output = json.loads(stdout.decode("utf-8"))
+
+        if not ffprobe_output or not ffprobe_output["streams"]:
+            logger.error("FFprobe output is empty or missing streams")
+            raise Exception("FFprobe output is empty or missing streams")
+
+        width = ffprobe_output["streams"][0]["width"]
+        height = ffprobe_output["streams"][0]["height"]
 
         logger.info(f"Original image dimensions: {width}x{height}")
 
+        image_stream.seek(0)  # Reset the stream position after FFprobe
 
         # Determine orientation and set appropriate dimensions (same as before)
         if width > height:
@@ -135,7 +151,7 @@ def process_image_to_video(image_gcs_url, length, frame_rate, zoom_speed, job_id
         cmd = [
             'ffmpeg', '-framerate', str(frame_rate), '-loop', '1', '-i', '-', # '-' for stdin
             '-vf', f"scale={scale_dims},zoompan=z='min(1+({zoom_speed}*{length})*on/{total_frames}, {zoom_factor})':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={output_dims}",
-            '-c:v', 'libx264', '-t', str(length), '-pix_fmt', 'yuv420p', '-f', 'matroska', '-' # '-' for stdout
+            '-c:v', 'libx264', '-t', str(length), '-pix_fmt', 'yuv420p', '-f', 'mp4', '-' # '-' for stdout
         ]
 
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
@@ -150,12 +166,65 @@ def process_image_to_video(image_gcs_url, length, frame_rate, zoom_speed, job_id
             logger.error(f"FFmpeg command failed. Error: {stderr.decode()}")
             raise subprocess.CalledProcessError(process.returncode, cmd, stdout, stderr)
 
+        # Standardization Logic
+        # Define target standardization parameters
+        target_video_codec = "libx264"
+        target_audio_codec = "aac"
+        target_audio_channels = 2
+        target_audio_sample_rate = 48000
+        target_pixel_format = "yuv420p"
+        target_frame_rate = 30 # Assuming a target frame rate of 30 fps
+
+        # Determine target resolution based on user-defined final target aspect ratio
+        target_aspect_ratio = data.get('target_aspect_ratio', '16:9') # Assuming target_aspect_ratio is passed in data
+
+        if target_aspect_ratio == '16:9':
+            target_resolution = "1920x1080"
+        elif target_aspect_ratio == '9:16':
+            target_resolution = "1080x1920"
+        elif target_aspect_ratio == '1:1':
+            target_resolution = "1080x1080"
+        elif target_aspect_ratio == '4:5':
+            target_resolution = "1080x1350"
+        else:
+            # Default to 16:9 if aspect ratio is not recognized
+            logger.warning(f"Unrecognized target aspect ratio: {target_aspect_ratio}. Defaulting to 16:9 (1920x1080).")
+            target_resolution = "1920x1080"
+
+        # Construct FFmpeg command for standardization
+        standardize_cmd = [
+            'ffmpeg',
+            '-i', '-',  # Input from stdin (output of previous FFmpeg process)
+            '-c:v', target_video_codec,
+            '-c:a', target_audio_codec,
+            '-ac', str(target_audio_channels),
+            '-ar', str(target_audio_sample_rate),
+            '-pix_fmt', target_pixel_format,
+            '-r', str(target_frame_rate),
+            '-vf', f"scale={target_resolution},pad={target_resolution}:(ow-iw)/2:(oh-ih)/2", # Scale and pad to target resolution
+            '-f', 'mp4',  # Output format
+            '-'  # Output to stdout
+        ]
+
+        logger.info(f"Running standardization FFmpeg command: {' '.join(standardize_cmd)}")
+
+        # Run standardization FFmpeg command (with streaming)
+        standardize_process = subprocess.Popen(
+            standardize_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        standardized_stdout, standardized_stderr = standardize_process.communicate(input=stdout) # Pass the output of the previous process as input
+
+        if standardize_process.returncode != 0:
+            logger.error(f"Standardization FFmpeg command failed. Error: {standardized_stderr.decode()}")
+            raise subprocess.CalledProcessError(standardize_process.returncode, standardize_cmd, standardized_stdout, standardized_stderr)
+
+
         # Upload the result to GCS
         # Use the imported upload_file utility from services.cloud_storage
         output_gcs_url = upload_file(
             bucket_name=output_gcs_bucket,
             destination_blob_name=output_gcs_blob_name,
-            data=stdout,  # stdout contains the video data from ffmpeg
+            data=standardized_stdout,  # stdout contains the standardized video data from ffmpeg
             content_type='video/mp4'  # Assuming this based on the .mp4 extension in output_gcs_blob_name
         )
         # Assuming upload_file returns the full GCS URI e.g., "gs://bucket/path/to/file.mp4"
