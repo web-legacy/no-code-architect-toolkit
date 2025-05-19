@@ -195,12 +195,8 @@ def concatenate_advanced_api():
         
         # --- Dynamically Construct FFmpeg filter_complex ---
         filter_complex_parts = []
-        concat_video_streams = ""
-        concat_audio_streams = ""
-        
-        # Assuming target resolution is fixed for now, or derived from payload if added later
-        # For now, using a placeholder target resolution (e.g., 1920x1080 for 16:9)
-        # This should ideally come from the frontend payload based on user selection.
+        interleaved_concat_streams = ""
+
         # Calculate target resolution based on aspect_ratio from payload
         try:
             ratio_x, ratio_y = map(int, aspect_ratio_str.split(':'))
@@ -220,19 +216,16 @@ def concatenate_advanced_api():
         for i, detail in enumerate(input_details):
             # Video stream processing (scaling and padding)
             filter_complex_parts.append(
-                f"[{i}:v]scale='min({target_width},iw*{target_height}/ih)':'min({target_height},ih*{target_width}/iw)',"
+                f"[{i}:v]scale='min({target_width},iw*{target_height}/ih)':'min(1080,ih*{target_width}/iw)',"
                 f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS[v{i}]"
             )
-            concat_video_streams += f"[v{i}]"
 
             # Audio stream processing (simplified as all inputs now have audio)
             filter_complex_parts.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
-            concat_audio_streams += f"[a{i}]"
 
-        # Concatenate video and audio streams with correct interleaving
-        interleaved_concat_streams = ""
-        for i in range(len(input_details)):
+            # Build interleaved concat streams
             interleaved_concat_streams += f"[v{i}][a{i}]"
+
 
         dynamic_filter_complex_str = f"{'; '.join(filter_complex_parts)}; {interleaved_concat_streams}concat=n={len(input_details)}:v=1:a=1[outv][outa]"
         logger.info(f"Job {job_id_param}: Generated dynamic filter_complex: {dynamic_filter_complex_str}")
