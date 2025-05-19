@@ -19,6 +19,8 @@ import uuid
 import subprocess
 import json
 import logging
+from urllib.parse import urlparse
+import ffmpeg
 from flask import Blueprint, request, jsonify
 from app_utils import validate_payload # Assuming you have this for payload validation
 from services.authentication import authenticate # Assuming you have this
@@ -159,15 +161,23 @@ def concatenate_advanced_api():
                     # Use the probed duration, or a default if probing failed
                     duration = probe_result["duration"] if probe_result["duration"] is not None else 5 
 
-                    if not add_silent_audio_track(local_path, silent_audio_output_path, duration):
-                         # Clean up original downloaded file
+                    try:
+                        (
+                            ffmpeg
+                            .input(local_path)
+                            .input('anullsrc=r=44100:cl=stereo', f='lavfi')
+                            .output(silent_audio_output_path, c='copy', acodec='aac', shortest=None) # Use shortest=None to match the shortest flag
+                            .run(capture_stdout=True, capture_stderr=True)
+                        )
+                        logger.info(f"Job {job_id_param}: Successfully added silent audio track to {url}")
+                        processed_local_path = silent_audio_output_path
+                        # The original local_path will be cleaned up later.
+                        # The processed_local_path (with silent audio) will be added to input_details.
+                    except ffmpeg.Error as e:
+                        logger.error(f"Job {job_id_param}: Failed to add silent audio track to {url}. Stderr: {e.stderr.decode()}")
+                        # Clean up original downloaded file
                         if os.path.exists(local_path): os.remove(local_path)
-                        return jsonify({"error": f"Failed to add silent audio track to {url}"}), 500
-                    
-                    processed_local_path = silent_audio_output_path
-                    logger.info(f"Job {job_id_param}: Added silent audio to {url}. New path: {processed_local_path}")
-                    # Add the new temporary file to the cleanup list
-                    local_input_paths.append(processed_local_path)
+                        return jsonify({"error": f"Failed to add silent audio track to {url}", "details": e.stderr.decode()}), 500
 
 
                 input_details.append({
