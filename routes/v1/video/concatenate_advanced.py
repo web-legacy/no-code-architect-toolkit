@@ -94,7 +94,7 @@ def probe_file_for_audio_and_duration(filepath):
 # })
 def concatenate_advanced_api():
     # Add a version log to confirm code update
-    logger.info("Executing concatenate_advanced_api - Version 2025-05-19-213500") # Timestamp for versioning
+    logger.info("Executing concatenate_advanced_api - Version 2025-05-20-110300") # Timestamp for versioning
     job_id_param = request.json.get('job_id', str(uuid.uuid4()))
     logger.info(f"Job {job_id_param}: Received advanced video concatenation request")
 
