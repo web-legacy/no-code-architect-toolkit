@@ -207,7 +207,8 @@ def concatenate_advanced_api():
         
         # --- Dynamically Construct FFmpeg filter_complex ---
         filter_complex_parts = []
-        interleaved_concat_streams = ""
+        video_outputs = []
+        audio_outputs = []
 
         # Calculate target resolution based on aspect_ratio from payload
         try:
@@ -231,18 +232,23 @@ def concatenate_advanced_api():
                 f"[{i}:v]scale='min({target_width},iw*{target_height}/ih)':'min(1080,ih*{target_width}/iw)',"
                 f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS[v{i}]"
             )
+            video_outputs.append(f"[v{i}]")
 
             # Audio stream processing (simplified as all inputs now have audio)
             filter_complex_parts.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
+            audio_outputs.append(f"[a{i}]")
 
-            # Build interleaved concat streams
-            interleaved_concat_streams += f"[v{i}][a{i}]"
+        # Build the interleaved concat input string
+        interleaved_concat_inputs = ""
+        for i in range(len(input_details)):
+             interleaved_concat_inputs += f"[v{i}][a{i}]"
 
 
-        dynamic_filter_complex_str = f"{'; '.join(filter_complex_parts)}; {interleaved_concat_streams}concat=n={len(input_details)}:v=1:a=1[outv][outa]"
+        # Combine filter parts and the concat filter
+        dynamic_filter_complex_str = f"{'; '.join(filter_complex_parts)}; {interleaved_concat_inputs}concat=n={len(input_details)}:v=1:a=1[outv][outa]"
         logger.info(f"Job {job_id_param}: Generated dynamic filter_complex: {dynamic_filter_complex_str}")
         command.extend(['-filter_complex', dynamic_filter_complex_str])
-        
+
         # Define output filename and add output options
         # For simplicity, assuming one output for now.
         # The output options should be passed in the request or derived.
