@@ -22,10 +22,12 @@ import requests
 from urllib.parse import urlparse, parse_qs
 import mimetypes
 from google.cloud import storage
+import json # Added import for parsing JSON credentials
+from google.oauth2 import service_account # Added import for service account credentials
 
 # Assuming a local storage path is configured (still needed for temp files if any)
 LOCAL_STORAGE_PATH = os.environ.get('LOCAL_STORAGE_PATH', '/tmp')
-
+GCP_SA_CREDENTIALS_JSON = os.environ.get('GCP_SA_CREDENTIALS', '{}') # Get credentials JSON from env var
 
 def get_extension_from_url(url):
     """Extract file extension from URL or content type.
@@ -66,7 +68,21 @@ def download_file(gcs_url):
     try:
         # Parse the GCS URL
         bucket_name, blob_name = gcs_url.split('/', 2)[2:]
-        storage_client = storage.Client()
+
+        # Explicitly load credentials from the environment variable
+        credentials = None
+        if GCP_SA_CREDENTIALS_JSON:
+            try:
+                credentials_info = json.loads(GCP_SA_CREDENTIALS_JSON)
+                credentials = service_account.Credentials.from_service_account_info(credentials_info)
+            except Exception as e:
+                print(f"Error loading GCP service account credentials from environment variable: {e}")
+                # Fallback to default credential discovery if explicit loading fails
+                credentials = None 
+
+        # Initialize storage client with explicit credentials if loaded, otherwise use default discovery
+        storage_client = storage.Client(credentials=credentials)
+
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
 
