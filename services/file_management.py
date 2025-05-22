@@ -66,8 +66,22 @@ def get_extension_from_url(url):
 def download_file(gcs_url):
     """Streams a file from GCS.  Does NOT download to local disk."""
     try:
-        # Parse the GCS URL
-        bucket_name, blob_name = gcs_url.split('/', 2)[2:]
+        # Parse the GCS URL to extract bucket and blob names
+        parsed_url = urlparse(gcs_url)
+        
+        if parsed_url.scheme == 'gs':
+            # Handle gs:// format
+            bucket_name = parsed_url.netloc
+            blob_name = parsed_url.path.lstrip('/')
+        elif parsed_url.scheme == 'https' and parsed_url.netloc == 'storage.googleapis.com':
+            # Handle https://storage.googleapis.com/bucket-name/object-name format
+            path_parts = parsed_url.path.lstrip('/').split('/', 1)
+            if len(path_parts) < 2:
+                 raise ValueError(f"Invalid GCS HTTPS URL format: {gcs_url}")
+            bucket_name = path_parts[0]
+            blob_name = path_parts[1]
+        else:
+            raise ValueError(f"Unsupported GCS URL format: {gcs_url}")
 
         # Explicitly load credentials from the environment variable
         credentials = None
